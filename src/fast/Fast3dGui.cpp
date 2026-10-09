@@ -10,6 +10,7 @@
 #include "fast/resource/type/Texture.h"
 #include "ship/window/gui/resource/GuiTextureFactory.h"
 #include "ship/resource/File.h"
+#include <stdexcept>
 
 #ifdef __APPLE__
 #include <SDL_hints.h>
@@ -27,6 +28,8 @@
 
 #ifdef ENABLE_OPENGL
 #include <imgui_impl_opengl3.h>
+#endif
+#if defined(ENABLE_OPENGL) || defined(ENABLE_FURY)
 #include <imgui_impl_sdl2.h>
 #endif
 
@@ -52,9 +55,6 @@ void Fast3dGui::Init(GuiWindowInitData windowImpl) {
 }
 
 bool Fast3dGui::SupportsViewports() {
-    if (mImpl.Backend == WindowBackend::FAST3D_SDL_FURY) {
-        return false;
-    }
 #ifdef __linux__
     const char* currentDesktop = std::getenv("XDG_CURRENT_DESKTOP");
     if (currentDesktop && std::string(currentDesktop) == "gamescope") {
@@ -66,6 +66,14 @@ bool Fast3dGui::SupportsViewports() {
     return false;
 #endif
 
+    if (mImpl.Backend == WindowBackend::FAST3D_SDL_FURY) {
+        if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendPlatformUserData)
+            return (ImGui::GetIO().BackendFlags & ImGuiBackendFlags_PlatformHasViewports) != 0;
+        // Gui asks before SDL's ImGui backend initializes. Only Fury's supported desktop
+        // platforms with global positioning can qualify; confirm SDL capability after init.
+        const char* driver = SDL_GetCurrentVideoDriver();
+        return driver && (std::string(driver) == "x11" || std::string(driver) == "windows");
+    }
     return true;
 }
 
@@ -94,7 +102,14 @@ void Fast3dGui::ImGuiWMInit() {
     switch (mImpl.Backend) {
 #ifdef ENABLE_FURY
         case WindowBackend::FAST3D_SDL_FURY:
-            ImGui_ImplSDL2_InitForVulkan(static_cast<SDL_Window*>(mImpl.Fury.Window));
+            if (!ImGui_ImplSDL2_InitForVulkan(static_cast<SDL_Window*>(mImpl.Fury.Window))) {
+                SPDLOG_CRITICAL("Failed to initialize Fury's ImGui SDL2 Vulkan platform backend");
+                throw std::runtime_error("Failed to initialize ImGui SDL2 Vulkan platform backend");
+            }
+            // Wayland cannot provide SDL2's global window/mouse positioning. Do not force
+            // PlatformHasViewports or install unsupported platform callbacks there.
+            if (!SupportsViewports())
+                ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
             break;
 #endif
         case WindowBackend::FAST3D_SDL_OPENGL:
@@ -130,6 +145,10 @@ void Fast3dGui::ImGuiWMShutdown() {
     switch (mImpl.Backend) {
 #ifdef ENABLE_FURY
         case WindowBackend::FAST3D_SDL_FURY:
+            // Gui tears down the platform first. Disconnect Fury while native windows and
+            // its runtime still exist; explicit renderer Shutdown may already have done so.
+            if (auto* api = static_cast<GfxRenderingAPIFury*>(ImGui::GetIO().BackendRendererUserData))
+                api->ShutdownGui();
             ImGui_ImplSDL2_Shutdown();
             break;
 #endif
@@ -160,8 +179,6 @@ void Fast3dGui::ImGuiBackendInit() {
 #ifdef ENABLE_FURY
         case WindowBackend::FAST3D_SDL_FURY:
             static_cast<GfxRenderingAPIFury*>(mInterpreter.lock()->GetCurrentRenderingAPI())->InitGui();
-            ImGui::GetIO().BackendRendererName = "ship_fury";
-            ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
             break;
 #endif
 #ifdef ENABLE_OPENGL
@@ -199,8 +216,8 @@ void Fast3dGui::ImGuiBackendShutdown() {
     switch (mImpl.Backend) {
 #ifdef ENABLE_FURY
         case WindowBackend::FAST3D_SDL_FURY:
-            ImGui::GetIO().BackendRendererName = nullptr;
-            ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_RendererHasVtxOffset;
+            if (auto* api = static_cast<GfxRenderingAPIFury*>(ImGui::GetIO().BackendRendererUserData))
+                api->ShutdownGui();
             break;
 #endif
 #ifdef ENABLE_OPENGL
@@ -314,6 +331,19 @@ void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
 }
 
 void Fast3dGui::DrawFloatingWindows() {
+#ifdef ENABLE_FURY
+    if (mImpl.Backend == WindowBackend::FAST3D_SDL_FURY) {
+        const bool viewportsEnabled = ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable;
+        if (viewportsEnabled)
+            ImGui::UpdatePlatformWindows();
+        auto* api = static_cast<GfxRenderingAPIFury*>(mInterpreter.lock()->GetCurrentRenderingAPI());
+        // This must also run on main-only frames, before either secondary or main present.
+        api->PublishViewportStates();
+        if (viewportsEnabled)
+            ImGui::RenderPlatformWindowsDefault();
+        return;
+    }
+#endif
     if (!(ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)) {
         return;
     }

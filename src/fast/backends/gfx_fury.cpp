@@ -26,12 +26,10 @@ void GfxRenderingAPIFury::Check(int result) {
         throw std::runtime_error(error);
     }
 }
-void GfxRenderingAPIFury::Init() {
-    if (mContext)
-        return;
+ShipFuryWindow GfxRenderingAPIFury::GetNativeWindow(SDL_Window* sdlWindow) {
     SDL_SysWMinfo info = {};
     SDL_VERSION(&info.version);
-    if (!SDL_GetWindowWMInfo(mWindow->GetSDLWindow(), &info))
+    if (!sdlWindow || !SDL_GetWindowWMInfo(sdlWindow, &info))
         throw std::runtime_error(SDL_GetError());
     ShipFuryWindow window = {};
 #if defined(SDL_VIDEO_DRIVER_WAYLAND)
@@ -54,17 +52,26 @@ void GfxRenderingAPIFury::Init() {
         window.surface = info.info.win.window;
     }
 #endif
-    mContext = ship_fury_create(window, std::getenv("SHIP_FURY_VALIDATION") != nullptr);
+    if (!window.kind)
+        throw std::runtime_error("Fury does not support this SDL native window backend");
+    return window;
+}
+void GfxRenderingAPIFury::Init() {
+    if (mContext)
+        return;
+    mContext =
+        ship_fury_create(GetNativeWindow(mWindow->GetSDLWindow()), std::getenv("SHIP_FURY_VALIDATION") != nullptr);
     Check(mContext && !*ship_fury_error(mContext));
 }
 void GfxRenderingAPIFury::Shutdown() {
     if (!mContext)
         return;
-    // The SDL window must still exist while the runtime retires its swapchain.
+    // Renderer callbacks retire secondary surfaces before SDL destroys their native windows.
+    ShutdownGui();
+    // The main SDL window must still exist while the runtime retires its swapchain.
     ship_fury_destroy(mContext);
     mContext = nullptr;
-    if (ImGui::GetCurrentContext())
-        ImGui::GetIO().Fonts->SetTexID(nullptr);
+    mFont = mGuiProgram = 0;
 }
 void GfxRenderingAPIFury::LoadShader(ShaderProgram* p) {
     mDraw.program = reinterpret_cast<Program*>(p)->id;
@@ -82,82 +89,53 @@ ShaderProgram* GfxRenderingAPIFury::LookupShader(uint64_t a, uint64_t b) {
 ShaderProgram* GfxRenderingAPIFury::CreateAndLoadNewShader(uint64_t a, uint64_t b) {
     CCFeatures features;
     gfx_cc_get_features(a, b, &features);
-    if (features.shader_id >= 0 && gfx_get_shader(features.shader_id))
-        throw std::runtime_error("Fury custom Prism shader overrides are not supported yet");
     size_t floats = 0;
+    std::string sourcePath = gfx_hlsl_shader_path(gfx_get_shader(features.shader_id));
     std::string source =
         gfx_direct3d_common_build_shader(floats, features, false, mFilter == FILTER_THREE_POINT, mSrgbMode);
     // DX11 accepts implicit truncation here; Slang requires the declared float3 assignment.
     if (!features.opt_alpha)
         for (int i = 1; i <= features.numInputs; ++i) {
             std::string name = "input" + std::to_string(i);
-            std::string from = "result." + name + " = float4(" + name + ", 1.0);";
-            auto pos = source.find(from);
-            if (pos != std::string::npos)
-                source.replace(pos, from.size(), "result." + name + " = " + name + ";");
+            std::regex assignment("\\bresult\\s*\\.\\s*" + name + "\\s*=\\s*float4\\s*\\(\\s*" + name +
+                                  "\\s*,\\s*1\\.0[fF]?\\s*\\)\\s*;");
+            source = std::regex_replace(source, assignment, "result." + name + " = " + name + ";");
         }
-    // Explicit Vulkan bindings preserve the fixed legacy six-texture layout without register collisions.
-    for (int i = 0; i < 6; ++i) {
-        std::string name = i < 2   ? "g_texture" + std::to_string(i)
-                           : i < 4 ? "g_textureMask" + std::to_string(i - 2)
-                                   : "g_textureBlend" + std::to_string(i - 4);
-        std::string from = "Texture2D " + name;
-        auto pos = source.find(from);
-        if (pos != std::string::npos)
-            source.insert(pos, "[[vk::binding(" + std::to_string(i) + ",0)]] ");
-    }
-    for (int i = 0; i < 2; ++i) {
-        auto pos = source.find("SamplerState g_sampler" + std::to_string(i));
-        if (pos != std::string::npos)
-            source.insert(pos, "[[vk::binding(" + std::to_string(6 + i) + ",0)]] ");
-    }
-    const char* cb[] = { "cbuffer PerFrameCB", "cbuffer PerDrawCB", "cbuffer PerPrimDepthCB" };
-    for (int i = 0; i < 3; ++i) {
-        auto pos = source.find(cb[i]);
-        if (pos != std::string::npos)
-            source.insert(pos, "[[vk::binding(" + std::to_string(8 + i) + ",0)]] ");
-    }
     std::vector<ShipFuryAttribute> attributes;
+    std::vector<detail::HlslVertexParameter> parameters;
     uint32_t offset = 0;
-    auto attr = [&](uint32_t n) {
+    auto attr = [&](uint32_t n, const std::string& name, const std::string& semantic) {
         attributes.push_back({ n, offset });
+        parameters.push_back({ n, name, semantic });
         offset += n * 4;
     };
-    attr(4);
+    attr(4, "position", "POSITION");
     for (int i = 0; i < 2; ++i)
         if (features.usedTextures[i]) {
-            attr(2);
+            std::string index = std::to_string(i);
+            attr(2, "uv" + index, "TEXCOORD" + index);
             for (int j = 0; j < 2; ++j)
                 if (features.clamp[i][j])
-                    attr(1);
+                    attr(1, std::string(j == 0 ? "texClampS" : "texClampT") + index,
+                         std::string(j == 0 ? "TEXCLAMPS" : "TEXCLAMPT") + index);
         }
     if (features.opt_fog)
-        attr(4);
+        attr(4, "fog", "FOG");
     if (features.opt_grayscale)
-        attr(4);
+        attr(4, "grayscale", "GRAYSCALE");
     for (int i = 0; i < features.numInputs; ++i)
-        attr(features.opt_alpha ? 4 : 3);
-    auto start = source.find("PSInput VSMain(");
-    auto end = source.find(") {", start);
-    if (start == std::string::npos || end == std::string::npos)
-        throw std::runtime_error("Missing HLSL vertex entry point");
-    std::string signature = source.substr(start, end - start);
-    std::regex parameter(R"(float[234]?\s+\w+\s*:\s*\w+)");
-    std::string annotated;
-    size_t last = 0;
-    uint32_t location = 0;
-    for (std::sregex_iterator i(signature.begin(), signature.end(), parameter), e; i != e; ++i) {
-        annotated += signature.substr(last, i->position() - last) + "[[vk::location(" + std::to_string(location++) +
-                     ")]] " + i->str();
-        last = i->position() + i->length();
-    }
-    annotated += signature.substr(last);
-    source.replace(start, end - start, annotated);
-    if (offset != floats * 4 || location != attributes.size())
-        throw std::runtime_error("HLSL vertex layout does not match interpreter");
+        attr(features.opt_alpha ? 4 : 3, "input" + std::to_string(i + 1), "INPUT" + std::to_string(i));
+    detail::PrepareFuryHlsl(source, sourcePath, parameters);
+    if (offset != floats * 4)
+        throw std::runtime_error("Prism HLSL shader '" + sourcePath + "': vertex layout does not match interpreter");
     uint32_t id =
         ship_fury_program(mContext, source.data(), source.size(), attributes.data(), attributes.size(), offset);
-    Check(id != 0);
+    if (id == 0) {
+        std::string error =
+            "Fury failed to compile Prism HLSL shader '" + sourcePath + "': " + ship_fury_error(mContext);
+        SPDLOG_ERROR("{}", error);
+        throw std::runtime_error(error);
+    }
     auto& p = mPrograms[{ a, b }];
     p = { id, static_cast<uint8_t>(features.numInputs), { features.usedTextures[0], features.usedTextures[1] } };
     auto result = reinterpret_cast<ShaderProgram*>(&p);
@@ -214,6 +192,10 @@ void GfxRenderingAPIFury::SetCurrentPrimDepth(float depth) {
     mDraw.prim_depth = depth;
 }
 void GfxRenderingAPIFury::DrawTriangles(float v[], size_t length, size_t triangles) {
+    auto mode = Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_Z_FIGHTING_MODE, 0);
+    mDraw.decal_slope = mode == 1   ? -float(mFramebuffers.at(mDraw.framebuffer).height) / 120.0f
+                        : mode == 2 ? -float(mFramebuffers.at(mDraw.framebuffer).height) / 100.0f
+                                    : -2.0f;
     for (int i = 0; i < 2; ++i) {
         auto& t = mTextures[mDraw.textures[i]];
         mDraw.width[i] = t.width;
@@ -227,8 +209,11 @@ void GfxRenderingAPIFury::StartFrame() {
     ++mDraw.noise_frame;
 }
 void GfxRenderingAPIFury::EndFrame() {
+    RefreshViewportStates();
     int w, h;
     SDL_Vulkan_GetDrawableSize(mWindow->GetSDLWindow(), &w, &h);
+    if (SDL_GetWindowFlags(mWindow->GetSDLWindow()) & SDL_WINDOW_MINIMIZED)
+        w = h = 0;
     Check(ship_fury_present(mContext, std::max(w, 0), std::max(h, 0),
                             Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_VSYNC_ENABLED, 1)));
 }
@@ -246,7 +231,8 @@ void GfxRenderingAPIFury::UpdateFramebufferParameters(int id, uint32_t w, uint32
 }
 void GfxRenderingAPIFury::StartDrawToFramebuffer(int id, float scale) {
     mDraw.framebuffer = id;
-    mDraw.noise_scale = scale;
+    if (scale != 0)
+        mDraw.noise_scale = 1.0f / scale;
 }
 void GfxRenderingAPIFury::ClearFramebuffer(bool color, bool depth) {
     Check(ship_fury_clear(mContext, mDraw.framebuffer, color, depth, nullptr));
@@ -313,8 +299,155 @@ void GfxRenderingAPIFury::SetSrgbMode() {
 ImTextureID GfxRenderingAPIFury::GetTextureById(int id) {
     return reinterpret_cast<ImTextureID>(uintptr_t(id));
 }
+void GfxRenderingAPIFury::ShutdownGui() {
+    if (!ImGui::GetCurrentContext() || ImGui::GetIO().BackendRendererUserData != this)
+        return;
+    ImGui::DestroyPlatformWindows();
+    auto& platform = ImGui::GetPlatformIO();
+    platform.Renderer_CreateWindow = nullptr;
+    platform.Renderer_DestroyWindow = nullptr;
+    platform.Renderer_SetWindowSize = nullptr;
+    platform.Renderer_RenderWindow = nullptr;
+    platform.Renderer_SwapBuffers = nullptr;
+    auto& io = ImGui::GetIO();
+    io.Fonts->SetTexID(nullptr);
+    io.BackendRendererUserData = nullptr;
+    io.BackendRendererName = nullptr;
+    io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasViewports);
+}
+SDL_Window* GfxRenderingAPIFury::GetViewportWindow(ImGuiViewport* viewport) {
+    // ImGui SDL2 (1.91.9b) stores a Uint32 window ID, not an SDL_Window pointer.
+    return SDL_GetWindowFromID(static_cast<Uint32>(reinterpret_cast<uintptr_t>(viewport->PlatformHandle)));
+}
+void GfxRenderingAPIFury::PublishViewportStates() {
+    for (auto* viewport : ImGui::GetPlatformIO().Viewports) {
+        auto* data = static_cast<ViewportData*>(viewport->RendererUserData);
+        if (data)
+            data->rendered = false;
+    }
+    RefreshViewportStates();
+}
+void GfxRenderingAPIFury::RefreshViewportStates() {
+    // Every present reconciles the full surface set. Pump native resize events
+    // before querying all drawable extents, including windows not being presented.
+    // Do not consume queued events or reset another viewport's pending render.
+    SDL_PumpEvents();
+    for (auto* viewport : ImGui::GetPlatformIO().Viewports) {
+        auto* data = static_cast<ViewportData*>(viewport->RendererUserData);
+        if (viewport != ImGui::GetMainViewport() && !data)
+            continue;
+        auto* window = viewport == ImGui::GetMainViewport() ? mWindow->GetSDLWindow() : GetViewportWindow(viewport);
+        int w = 0, h = 0;
+        const bool minimized = !window || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED);
+        if (window)
+            SDL_Vulkan_GetDrawableSize(window, &w, &h);
+        Check(ship_fury_surface_state(mContext, data ? data->surface : 0, std::max(w, 0), std::max(h, 0), minimized));
+    }
+}
+void GfxRenderingAPIFury::CreateViewport(ImGuiViewport* viewport) {
+    if (viewport == ImGui::GetMainViewport())
+        return;
+    auto* adapter = static_cast<GfxRenderingAPIFury*>(ImGui::GetIO().BackendRendererUserData);
+    IM_ASSERT(adapter && !viewport->RendererUserData);
+    auto window = GetNativeWindow(GetViewportWindow(viewport));
+    // Framebuffer IDs are monotonically allocated and also reserve unique nonzero surface IDs.
+    auto id = static_cast<uint32_t>(adapter->CreateFramebuffer());
+    auto data = std::make_unique<ViewportData>();
+    data->adapter = adapter;
+    data->framebuffer = data->surface = id;
+    adapter->Check(ship_fury_register_surface(adapter->mContext, id, window));
+    viewport->RendererUserData = data.release();
+    ResizeViewport(viewport, viewport->Size);
+}
+void GfxRenderingAPIFury::DestroyViewport(ImGuiViewport* viewport) {
+    auto* data = static_cast<ViewportData*>(viewport->RendererUserData);
+    if (!data)
+        return;
+    auto* adapter = data->adapter;
+    // Never throw during teardown: retire every surface even if one runtime operation fails.
+    if (adapter->mContext) {
+        if (!ship_fury_unregister_surface(adapter->mContext, data->surface))
+            SPDLOG_ERROR("Fury viewport surface teardown: {}", ship_fury_error(adapter->mContext));
+        if (data->width && !ship_fury_delete_framebuffer(adapter->mContext, data->framebuffer))
+            SPDLOG_ERROR("Fury viewport framebuffer teardown: {}", ship_fury_error(adapter->mContext));
+    }
+    delete data;
+    viewport->RendererUserData = nullptr;
+}
+void GfxRenderingAPIFury::ResizeViewport(ImGuiViewport* viewport, ImVec2) {
+    auto* data = static_cast<ViewportData*>(viewport->RendererUserData);
+    if (!data)
+        return;
+    data->rendered = false;
+    auto* window = GetViewportWindow(viewport);
+    if (!window || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED))
+        return;
+    int w, h;
+    SDL_Vulkan_GetDrawableSize(window, &w, &h);
+    if (w <= 0 || h <= 0)
+        return;
+    if (data->width != static_cast<uint32_t>(w) || data->height != static_cast<uint32_t>(h)) {
+        data->adapter->UpdateFramebufferParameters(data->framebuffer, w, h, 1, false, true, false, false);
+        data->width = w;
+        data->height = h;
+    }
+}
+void GfxRenderingAPIFury::RenderViewport(ImGuiViewport* viewport, void*) {
+    auto* data = static_cast<ViewportData*>(viewport->RendererUserData);
+    if (!data)
+        return;
+    ResizeViewport(viewport, viewport->Size);
+    auto* window = GetViewportWindow(viewport);
+    if (!window || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) || !viewport->DrawData ||
+        viewport->DrawData->DisplaySize.x <= 0 || viewport->DrawData->DisplaySize.y <= 0)
+        return;
+    int w, h;
+    SDL_Vulkan_GetDrawableSize(window, &w, &h);
+    if (w <= 0 || h <= 0)
+        return;
+    auto* adapter = data->adapter;
+    if (!(viewport->Flags & ImGuiViewportFlags_NoRendererClear))
+        adapter->Check(ship_fury_clear(adapter->mContext, data->framebuffer, 1, 0, nullptr));
+    // SDL2's draw-data scale may come from the main window. Use this window's Vulkan pixel extent.
+    ImDrawData drawData = *viewport->DrawData;
+    drawData.FramebufferScale = ImVec2(float(w) / drawData.DisplaySize.x, float(h) / drawData.DisplaySize.y);
+    adapter->RenderGui(&drawData, data->framebuffer);
+    data->rendered = true;
+}
+void GfxRenderingAPIFury::PresentViewport(ImGuiViewport* viewport, void*) {
+    auto* data = static_cast<ViewportData*>(viewport->RendererUserData);
+    if (!data || !data->rendered)
+        return;
+    data->rendered = false;
+    auto* adapter = data->adapter;
+    adapter->RefreshViewportStates();
+    auto* window = GetViewportWindow(viewport);
+    if (!window || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED))
+        return;
+    int w, h;
+    SDL_Vulkan_GetDrawableSize(window, &w, &h);
+    if (w <= 0 || h <= 0)
+        return;
+    adapter->Check(ship_fury_present_surface(
+        adapter->mContext, data->surface, data->framebuffer, w, h,
+        Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_VSYNC_ENABLED, 1)));
+}
 void GfxRenderingAPIFury::EnsureGui() {
     Init();
+    auto& io = ImGui::GetIO();
+    if (!io.BackendRendererUserData) {
+        io.BackendRendererUserData = this;
+        io.BackendRendererName = "ship_fury";
+        io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasViewports;
+        auto& platform = ImGui::GetPlatformIO();
+        platform.Renderer_CreateWindow = CreateViewport;
+        platform.Renderer_DestroyWindow = DestroyViewport;
+        platform.Renderer_SetWindowSize = ResizeViewport;
+        platform.Renderer_RenderWindow = RenderViewport;
+        platform.Renderer_SwapBuffers = PresentViewport;
+        // Only secondary viewports own RendererUserData. Surface zero belongs to the main window.
+    }
+    IM_ASSERT(io.BackendRendererUserData == this);
     if (!mFont || !ImGui::GetIO().Fonts->IsBuilt()) {
         unsigned char* pixels;
         int w, h;
@@ -322,8 +455,8 @@ void GfxRenderingAPIFury::EnsureGui() {
         if (!mFont)
             mFont = NewTexture();
         Check(ship_fury_upload(mContext, mFont, pixels, w, h));
-        ImGui::GetIO().Fonts->SetTexID(GetTextureById(mFont));
     }
+    ImGui::GetIO().Fonts->SetTexID(GetTextureById(mFont));
     if (mGuiProgram)
         return;
     const char* source = R"(
@@ -340,17 +473,25 @@ float4 PSMain(V v):SV_Target{return v.color*image.Sample(imageSampler,v.uv);}
     mGuiProgram = ship_fury_program(mContext, source, std::strlen(source), attributes, 3, sizeof(ImDrawVert));
     Check(mGuiProgram != 0);
 }
-void GfxRenderingAPIFury::RenderGui(ImDrawData* data) {
-    if (data->DisplaySize.x <= 0 || data->DisplaySize.y <= 0)
+void GfxRenderingAPIFury::RenderGui(ImDrawData* data, uint32_t framebuffer) {
+    if (!data || data->DisplaySize.x <= 0 || data->DisplaySize.y <= 0 ||
+        int(data->DisplaySize.x * data->FramebufferScale.x) <= 0 ||
+        int(data->DisplaySize.y * data->FramebufferScale.y) <= 0)
         return;
     EnsureGui();
     ShipFuryDraw state = {};
+    state.framebuffer = framebuffer;
     state.program = mGuiProgram;
     state.gui = 1;
     state.alpha = 1;
     state.sampler[0] = 1 | (2 << 1) | (2 << 3);
     state.viewport = { 0, 0, int(data->DisplaySize.x * data->FramebufferScale.x),
                        int(data->DisplaySize.y * data->FramebufferScale.y) };
+    if (framebuffer) {
+        const auto& target = mFramebuffers.at(framebuffer);
+        state.viewport.width = target.width;
+        state.viewport.height = target.height;
+    }
     state.gui_transform[0] = 2 / data->DisplaySize.x;
     state.gui_transform[1] = -2 / data->DisplaySize.y;
     state.gui_transform[2] = -1 - data->DisplayPos.x * state.gui_transform[0];

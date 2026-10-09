@@ -487,11 +487,18 @@ void GfxWindowBackendSDL2::SetMousePos(int32_t x, int32_t y) {
 }
 
 void GfxWindowBackendSDL2::GetMousePos(int32_t* x, int32_t* y) {
+    if (mFury && (SDL_GetKeyboardFocus() != mWnd || SDL_GetMouseFocus() != mWnd)) {
+        *x = *y = 0;
+        return;
+    }
     SDL_GetMouseState(x, y);
 }
 
 void GfxWindowBackendSDL2::GetMouseDelta(int32_t* x, int32_t* y) {
+    // Always consume SDL's accumulator, even when the game must ignore the motion.
     SDL_GetRelativeMouseState(x, y);
+    if (mFury && (SDL_GetKeyboardFocus() != mWnd || SDL_GetMouseFocus() != mWnd))
+        *x = *y = 0;
 }
 
 void GfxWindowBackendSDL2::GetMouseWheel(float* x, float* y) {
@@ -502,6 +509,8 @@ void GfxWindowBackendSDL2::GetMouseWheel(float* x, float* y) {
 }
 
 bool GfxWindowBackendSDL2::GetMouseState(uint32_t btn) {
+    if (mFury && (SDL_GetKeyboardFocus() != mWnd || SDL_GetMouseFocus() != mWnd))
+        return false;
     return SDL_GetMouseState(nullptr, nullptr) & (1 << btn);
 }
 
@@ -633,6 +642,36 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
             sWarnedOnce = true;
         }
     }
+    // ImGui receives all platform events, but detached Fury windows must not drive
+    // game input, resize the game, or close the main window.
+    if (mFury) {
+        Uint32 windowID = 0;
+        switch (event.type) {
+            case SDL_KEYDOWN:
+            case SDL_KEYUP:
+                windowID = event.key.windowID;
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+            case SDL_MOUSEBUTTONUP:
+                windowID = event.button.windowID;
+                break;
+            case SDL_MOUSEMOTION:
+                windowID = event.motion.windowID;
+                if (windowID != SDL_GetWindowID(mWnd))
+                    SDL_GetRelativeMouseState(nullptr, nullptr);
+                break;
+            case SDL_MOUSEWHEEL:
+                windowID = event.wheel.windowID;
+                break;
+            case SDL_WINDOWEVENT:
+                windowID = event.window.windowID;
+                break;
+            default:
+                break;
+        }
+        if (windowID && windowID != SDL_GetWindowID(mWnd))
+            return;
+    }
     switch (event.type) {
 #ifndef TARGET_WEB
         // Scancodes are broken in Emscripten SDL2: https://bugzilla.libsdl.org/show_bug.cgi?id=3259
@@ -655,6 +694,22 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
 #endif
         case SDL_WINDOWEVENT:
             switch (event.window.event) {
+                case SDL_WINDOWEVENT_FOCUS_GAINED:
+                    if (mFury)
+                        SDL_GetRelativeMouseState(nullptr, nullptr);
+                    break;
+                case SDL_WINDOWEVENT_FOCUS_LOST:
+                    if (mFury) {
+                        SDL_GetRelativeMouseState(nullptr, nullptr);
+                        // A release may arrive in a detached window and is intentionally
+                        // excluded from game input, so clear held main-window inputs now.
+                        if (mOnAllKeysUp)
+                            mOnAllKeysUp();
+                        for (int button = 0; button < 5; ++button)
+                            OnMouseButtonUp(button);
+                        mMouseWheelX = mMouseWheelY = 0.0f;
+                    }
+                    break;
                 case SDL_WINDOWEVENT_SIZE_CHANGED:
 #ifdef __APPLE__
                     SDL_GetWindowSize(mWnd, &mWindowWidth, &mWindowHeight);
@@ -695,6 +750,10 @@ void GfxWindowBackendSDL2::HandleEvents() {
     while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
         HandleSingleEvent(event);
     }
+
+    // Drain detached motion even on frames where the game does not poll mouse delta.
+    if (mFury && (SDL_GetKeyboardFocus() != mWnd || SDL_GetMouseFocus() != mWnd))
+        SDL_GetRelativeMouseState(nullptr, nullptr);
 
     // resync fullscreen state
 #ifdef __APPLE__

@@ -204,8 +204,9 @@ bool ControllerButton::ProcessKeyboardEvent(KbEventType eventType, KbScancode sc
         if (mapping->GetMappingType() == MAPPING_TYPE_KEYBOARD) {
             std::shared_ptr<KeyboardKeyToButtonMapping> ktobMapping =
                 std::dynamic_pointer_cast<KeyboardKeyToButtonMapping>(mapping);
-            if (ktobMapping != nullptr) {
-                result = result || ktobMapping->ProcessKeyboardEvent(eventType, scancode);
+            if (ktobMapping != nullptr && (!result || eventType == LUS_KB_EVENT_ALL_KEYS_UP)) {
+                // Focus loss must release every mapping, even after another handled the event.
+                result = ktobMapping->ProcessKeyboardEvent(eventType, scancode) || result;
             }
         }
     }

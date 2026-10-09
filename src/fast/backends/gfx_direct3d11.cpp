@@ -1245,6 +1245,7 @@ void GfxRenderingAPIDX11::SetSrgbMode() {
 #if defined(ENABLE_DX11) || defined(ENABLE_FURY)
 #include "fast/backends/gfx_hlsl_shader.h"
 #include <spdlog/spdlog.h>
+#include <stdexcept>
 #include "fast/interpreter.h"
 #include "ship/Context.h"
 #include <prism/processor.h>
@@ -1402,6 +1403,27 @@ std::optional<std::string> dx_include_fs(const std::string& path) {
     return *inc;
 }
 
+// Prism inserts include contents into its input iteratively, without an active
+// include stack. Bound both repeated expansion (including cycles) and cumulative
+// source bytes; repeated non-cyclic includes remain legal within these limits.
+static constexpr size_t hlsl_source_budget = 1024 * 1024;
+static constexpr size_t hlsl_include_budget = 128;
+static size_t hlsl_source_bytes = 0;
+static size_t hlsl_include_count = 0;
+
+static std::optional<std::string> bounded_hlsl_include(const std::string& path) {
+    if (++hlsl_include_count > hlsl_include_budget)
+        throw std::runtime_error("include expansion limit exceeded at '" + path +
+                                 "' (128 includes; check for include cycles)");
+    auto source = dx_include_fs(path);
+    if (source) {
+        if (source->size() > hlsl_source_budget - hlsl_source_bytes)
+            throw std::runtime_error("source expansion exceeds 1 MiB at include '" + path + "'");
+        hlsl_source_bytes += source->size();
+    }
+    return source;
+}
+
 std::string gfx_direct3d_common_build_shader(size_t& numFloats, const CCFeatures& cc_features,
                                              bool include_root_signature, bool three_point_filtering, bool use_srgb) {
     raw_numFloats = 4;
@@ -1454,24 +1476,34 @@ std::string gfx_direct3d_common_build_shader(size_t& numFloats, const CCFeatures
     init->ByteOrder = Ship::Endianness::Native;
     init->Format = RESOURCE_FORMAT_BINARY;
     const char* shaderName = Fast::gfx_get_shader(cc_features.shader_id);
-    std::string path = "shaders/directx/default.shader.hlsl";
-
-    if (nullptr != shaderName) {
-        path = std::string(shaderName) + ".hlsl";
-    }
-
-    auto res = static_pointer_cast<Ship::Shader>(Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(
-        "shaders/directx/default.shader.hlsl", true, init));
+    std::string path = gfx_hlsl_shader_path(shaderName);
+    auto res = static_pointer_cast<Ship::Shader>(
+        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path, true, init));
 
     if (res == nullptr) {
-        SPDLOG_ERROR("Failed to load default directx shader, missing f3d.o2r?");
-        abort();
+        if (shaderName != nullptr) {
+            throw std::runtime_error("Failed to load custom Prism HLSL shader '" + path +
+                                     "'. Provide this .hlsl archive resource with the Fast3D vertex layout and "
+                                     "VSMain/PSMain entry points, or select OpenGL for .glsl-only mods; "
+                                     "the default shader is not substituted.");
+        }
+        throw std::runtime_error("Failed to load default Prism HLSL shader '" + path + "'; check f3d.o2r.");
     }
 
     auto shader = static_cast<std::string*>(res->GetRawPointer());
-    processor.load(*shader);
-    processor.bind_include_loader(dx_include_fs);
-    auto result = processor.process();
+    std::string result;
+    try {
+        if (shader->size() > hlsl_source_budget)
+            throw std::runtime_error("source exceeds 1 MiB");
+        hlsl_source_bytes = shader->size();
+        hlsl_include_count = 0;
+        processor.load(*shader);
+        // Includes use exact archive paths, just as the top-level shader does.
+        processor.bind_include_loader(bounded_hlsl_include);
+        result = processor.process();
+    } catch (const std::exception& error) {
+        throw std::runtime_error("Failed to process Prism HLSL shader '" + path + "': " + error.what());
+    }
     numFloats = raw_numFloats;
     // SPDLOG_INFO("=========== DX11 SHADER ============");
     // SPDLOG_INFO(result);

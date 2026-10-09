@@ -352,8 +352,9 @@ bool ControllerStick::ProcessKeyboardEvent(KbEventType eventType, KbScancode sca
             if (mapping->GetMappingType() == MAPPING_TYPE_KEYBOARD) {
                 std::shared_ptr<KeyboardKeyToAxisDirectionMapping> ktoadMapping =
                     std::dynamic_pointer_cast<KeyboardKeyToAxisDirectionMapping>(mapping);
-                if (ktoadMapping != nullptr) {
-                    result = result || ktoadMapping->ProcessKeyboardEvent(eventType, scancode);
+                if (ktoadMapping != nullptr && (!result || eventType == LUS_KB_EVENT_ALL_KEYS_UP)) {
+                    // Focus loss must release every mapping, even after another handled the event.
+                    result = ktoadMapping->ProcessKeyboardEvent(eventType, scancode) || result;
                 }
             }
         }

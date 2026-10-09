@@ -7,6 +7,8 @@
 #include <memory>
 #include <vector>
 
+struct SDL_Window;
+
 namespace Fast {
 class GfxWindowBackendSDL2;
 class GfxRenderingAPIFury final : public GfxRenderingAPI {
@@ -14,7 +16,9 @@ class GfxRenderingAPIFury final : public GfxRenderingAPI {
     explicit GfxRenderingAPIFury(GfxWindowBackendSDL2* window);
     ~GfxRenderingAPIFury() override;
     void Shutdown() override;
-    void RenderGui(ImDrawData* data);
+    void RenderGui(ImDrawData* data, uint32_t framebuffer = 0);
+    void ShutdownGui();
+    void PublishViewportStates();
     void InitGui() {
         EnsureGui();
     }
@@ -86,8 +90,22 @@ class GfxRenderingAPIFury final : public GfxRenderingAPI {
     struct Framebuffer {
         uint32_t width = 1, height = 1;
     };
+    struct ViewportData {
+        GfxRenderingAPIFury* adapter;
+        uint32_t framebuffer, surface;
+        uint32_t width = 0, height = 0;
+        bool rendered = false;
+    };
+    static ShipFuryWindow GetNativeWindow(SDL_Window* window);
+    static SDL_Window* GetViewportWindow(ImGuiViewport* viewport);
+    static void CreateViewport(ImGuiViewport* viewport);
+    static void DestroyViewport(ImGuiViewport* viewport);
+    static void ResizeViewport(ImGuiViewport* viewport, ImVec2 size);
+    static void RenderViewport(ImGuiViewport* viewport, void*);
+    static void PresentViewport(ImGuiViewport* viewport, void*);
     void Check(int result);
     void EnsureGui();
+    void RefreshViewportStates();
     GfxWindowBackendSDL2* mWindow;
     ShipFury* mContext = nullptr;
     ShipFuryDraw mDraw = {};
