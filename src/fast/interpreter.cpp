@@ -4993,13 +4993,13 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
 void Interpreter::Destroy() {
     // TODO: should also destroy rapi, and any other resources acquired in fast3d
     free(mTexUploadBuffer);
-    mWapi->Destroy();
-
     // Texture cache and loaded textures store references to Resources which need to be unreferenced.
     TextureCacheClear();
     mRdp->texture_to_load.raw_tex_metadata.resource = nullptr;
     mRdp->loaded_texture[0].raw_tex_metadata.resource = nullptr;
     mRdp->loaded_texture[1].raw_tex_metadata.resource = nullptr;
+    mRapi->Shutdown();
+    mWapi->Destroy();
 }
 
 GfxRenderingAPI* Interpreter::GetCurrentRenderingAPI() {

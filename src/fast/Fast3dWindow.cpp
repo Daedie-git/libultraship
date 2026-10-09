@@ -8,6 +8,7 @@
 #include "fast/backends/gfx_sdl.h"
 #include "fast/backends/gfx_dxgi.h"
 #include "fast/backends/gfx_opengl.h"
+#include "fast/backends/gfx_fury.h"
 #include "fast/backends/gfx_metal.h"
 #include "fast/backends/gfx_direct3d_common.h"
 #include "fast/backends/gfx_direct3d11.h"
@@ -37,6 +38,9 @@ Fast3dWindow::Fast3dWindow(std::shared_ptr<Ship::Gui> gui, std::shared_ptr<FastM
     }
 #endif
     AddAvailableWindowBackend(WindowBackend::FAST3D_SDL_OPENGL);
+#ifdef ENABLE_FURY
+    AddAvailableWindowBackend(WindowBackend::FAST3D_SDL_FURY);
+#endif
 }
 
 Fast3dWindow::Fast3dWindow(std::shared_ptr<Ship::Gui> gui)
@@ -137,6 +141,14 @@ void Fast3dWindow::InitWindowManager() {
     SetWindowBackend(GetSavedWindowBackend());
 
     switch (GetWindowBackend()) {
+#ifdef ENABLE_FURY
+        case WindowBackend::FAST3D_SDL_FURY: {
+            auto* window = new GfxWindowBackendSDL2(true);
+            mWindowManagerApi = window;
+            mRenderingApi = new GfxRenderingAPIFury(window);
+            break;
+        }
+#endif
 #ifdef ENABLE_DX11
         case WindowBackend::FAST3D_DXGI_DX11:
             mWindowManagerApi = new GfxWindowBackendDXGI();
@@ -303,7 +315,7 @@ bool Fast3dWindow::SupportsWindowedFullscreen() {
     return false;
 #endif
 
-    if (GetWindowBackend() == WindowBackend::FAST3D_SDL_OPENGL) {
+    if (GetWindowBackend() == WindowBackend::FAST3D_SDL_OPENGL || GetWindowBackend() == WindowBackend::FAST3D_SDL_FURY) {
         return true;
     }
 
@@ -401,6 +413,8 @@ std::string Fast3dWindow::GetWindowBackendName() {
             return "OpenGL";
         case WindowBackend::FAST3D_SDL_METAL:
             return "Metal";
+        case WindowBackend::FAST3D_SDL_FURY:
+            return "Fury Vulkan";
         default:
             return "";
     }

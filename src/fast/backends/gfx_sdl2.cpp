@@ -1,4 +1,4 @@
-#if defined(ENABLE_OPENGL) || defined(__APPLE__)
+#if defined(ENABLE_OPENGL) || defined(ENABLE_FURY) || defined(__APPLE__)
 
 #include <stdio.h>
 
@@ -15,6 +15,9 @@
 #include "ship/controller/controldeck/ControlDeck.h"
 #include "ship/window/FileDropMgr.h"
 #include "fast/backends/gfx_sdl.h"
+#ifdef ENABLE_FURY
+#include <SDL2/SDL_vulkan.h>
+#endif
 
 #ifdef __OpenBSD__
 #include <sys/sysctl.h>
@@ -331,17 +334,13 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
 
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
-#if defined(__APPLE__)
-    bool use_opengl = strcmp(gfxApiName, "OpenGL") == 0;
-#else
-    constexpr bool use_opengl = true;
-#endif
+    bool use_opengl = !mFury && strcmp(gfxApiName, "OpenGL") == 0;
 
     if (use_opengl) {
         SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
         SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    } else {
+    } else if (!mFury) {
         SDL_SetHint(SDL_HINT_RENDER_DRIVER, "metal");
     }
 
@@ -379,10 +378,12 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
     Uint32 flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #endif
 
-    if (use_opengl) {
-        flags = flags | SDL_WINDOW_OPENGL;
+    if (mFury) {
+        flags |= SDL_WINDOW_VULKAN;
+    } else if (use_opengl) {
+        flags |= SDL_WINDOW_OPENGL;
     } else {
-        flags = flags | SDL_WINDOW_METAL;
+        flags |= SDL_WINDOW_METAL;
     }
 
     mWnd = SDL_CreateWindow(title, posX, posY, mWindowWidth, mWindowHeight, flags);
@@ -404,6 +405,16 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
         posY = 100;
     }
 
+#ifdef ENABLE_FURY
+    if (mFury) {
+        SDL_Vulkan_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
+        if (startFullScreen) {
+            SetFullscreenImpl(true, false);
+        }
+        window_impl.Fury = { mWnd };
+        window_impl.Backend = WindowBackend::FAST3D_SDL_FURY;
+    } else
+#endif
     if (use_opengl) {
         SDL_GL_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
 
@@ -528,6 +539,12 @@ void GfxWindowBackendSDL2::GetDimensions(uint32_t* width, uint32_t* height, int3
 #ifdef __APPLE__
     SDL_GetWindowSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
 #else
+#ifdef ENABLE_FURY
+    if (mFury) {
+        SDL_Vulkan_GetDrawableSize(mWnd, reinterpret_cast<int*>(width), reinterpret_cast<int*>(height));
+    }
+    else
+#endif
     SDL_GL_GetDrawableSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
 #endif
     SDL_GetWindowPosition(mWnd, static_cast<int*>(posX), static_cast<int*>(posY));
@@ -642,6 +659,12 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
 #ifdef __APPLE__
                     SDL_GetWindowSize(mWnd, &mWindowWidth, &mWindowHeight);
 #else
+#ifdef ENABLE_FURY
+                    if (mFury) {
+                        SDL_Vulkan_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
+                    }
+                    else
+#endif
                     SDL_GL_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
 #endif
                     break;
@@ -742,12 +765,18 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
 
     if (mVsyncEnabled != nextVsyncEnabled) {
         mVsyncEnabled = nextVsyncEnabled;
-        SDL_GL_SetSwapInterval(mVsyncEnabled ? 1 : 0);
-        SDL_RenderSetVSync(mRenderer, mVsyncEnabled ? 1 : 0);
+        if (mCtx) {
+            SDL_GL_SetSwapInterval(mVsyncEnabled ? 1 : 0);
+        }
+        if (mRenderer) {
+            SDL_RenderSetVSync(mRenderer, mVsyncEnabled ? 1 : 0);
+        }
     }
 
     SyncFramerateWithTime();
-    SDL_GL_SwapWindow(mWnd);
+    if (mCtx) {
+        SDL_GL_SwapWindow(mWnd);
+    }
 }
 
 void GfxWindowBackendSDL2::SwapBuffersEnd() {
@@ -782,10 +811,16 @@ bool GfxWindowBackendSDL2::IsRunning() {
 }
 
 void GfxWindowBackendSDL2::Destroy() {
-    // TODO: destroy _any_ resources used by SDL
-    SDL_GL_DeleteContext(mCtx);
+    if (mCtx) {
+        SDL_GL_DeleteContext(mCtx);
+    }
+    if (mRenderer) {
+        SDL_DestroyRenderer(mRenderer);
+    }
     SDL_DestroyWindow(mWnd);
-    SDL_DestroyRenderer(mRenderer);
+    mCtx = nullptr;
+    mRenderer = nullptr;
+    mWnd = nullptr;
     SDL_Quit();
 }
 

@@ -50,6 +50,8 @@ class GfxRenderingAPI {
     virtual void SetUseAlpha(bool useAlpha) = 0;
     virtual void DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) = 0;
     virtual void Init() = 0;
+    // Release native presentation resources while the window is still alive.
+    virtual void Shutdown() {}
     virtual void OnResize() = 0;
     virtual void StartFrame() = 0;
     virtual void EndFrame() = 0;

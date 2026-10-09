@@ -4,6 +4,7 @@
 #include "ship/Context.h"
 #include "ship/config/ConsoleVariable.h"
 #include "fast/backends/gfx_metal.h"
+#include "fast/backends/gfx_fury.h"
 #include "fast/interpreter.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/resource/type/Texture.h"
@@ -51,6 +52,9 @@ void Fast3dGui::Init(GuiWindowInitData windowImpl) {
 }
 
 bool Fast3dGui::SupportsViewports() {
+    if (mImpl.Backend == WindowBackend::FAST3D_SDL_FURY) {
+        return false;
+    }
 #ifdef __linux__
     const char* currentDesktop = std::getenv("XDG_CURRENT_DESKTOP");
     if (currentDesktop && std::string(currentDesktop) == "gamescope") {
@@ -67,6 +71,7 @@ bool Fast3dGui::SupportsViewports() {
 
 void Fast3dGui::HandleWindowEvents(Fast::WindowEvent event) {
     switch (mImpl.Backend) {
+        case WindowBackend::FAST3D_SDL_FURY:
         case WindowBackend::FAST3D_SDL_OPENGL:
         case WindowBackend::FAST3D_SDL_METAL:
             ImGui_ImplSDL2_ProcessEvent(static_cast<const SDL_Event*>(event.Sdl.Event));
@@ -87,6 +92,11 @@ void Fast3dGui::HandleWindowEvents(Fast::WindowEvent event) {
 
 void Fast3dGui::ImGuiWMInit() {
     switch (mImpl.Backend) {
+#ifdef ENABLE_FURY
+        case WindowBackend::FAST3D_SDL_FURY:
+            ImGui_ImplSDL2_InitForVulkan(static_cast<SDL_Window*>(mImpl.Fury.Window));
+            break;
+#endif
         case WindowBackend::FAST3D_SDL_OPENGL:
             SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
             if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_ALLOW_BACKGROUND_INPUTS, 1)) {
@@ -118,6 +128,11 @@ void Fast3dGui::ImGuiWMInit() {
 
 void Fast3dGui::ImGuiWMShutdown() {
     switch (mImpl.Backend) {
+#ifdef ENABLE_FURY
+        case WindowBackend::FAST3D_SDL_FURY:
+            ImGui_ImplSDL2_Shutdown();
+            break;
+#endif
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             ImGui_ImplSDL2_Shutdown();
@@ -142,6 +157,13 @@ void Fast3dGui::ImGuiBackendInit() {
     auto window = Ship::Context::GetRawInstance()->GetWindow();
     mInterpreter = std::dynamic_pointer_cast<Fast3dWindow>(window)->GetInterpreterWeak();
     switch (mImpl.Backend) {
+#ifdef ENABLE_FURY
+        case WindowBackend::FAST3D_SDL_FURY:
+            static_cast<GfxRenderingAPIFury*>(mInterpreter.lock()->GetCurrentRenderingAPI())->InitGui();
+            ImGui::GetIO().BackendRendererName = "ship_fury";
+            ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+            break;
+#endif
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
 #ifdef __APPLE__
@@ -175,6 +197,12 @@ void Fast3dGui::ImGuiBackendInit() {
 
 void Fast3dGui::ImGuiBackendShutdown() {
     switch (mImpl.Backend) {
+#ifdef ENABLE_FURY
+        case WindowBackend::FAST3D_SDL_FURY:
+            ImGui::GetIO().BackendRendererName = nullptr;
+            ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_RendererHasVtxOffset;
+            break;
+#endif
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             ImGui_ImplOpenGL3_Shutdown();
@@ -197,6 +225,11 @@ void Fast3dGui::ImGuiBackendShutdown() {
 
 void Fast3dGui::ImGuiBackendNewFrame() {
     switch (mImpl.Backend) {
+#ifdef ENABLE_FURY
+        case WindowBackend::FAST3D_SDL_FURY:
+            static_cast<GfxRenderingAPIFury*>(mInterpreter.lock()->GetCurrentRenderingAPI())->InitGui();
+            break;
+#endif
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             ImGui_ImplOpenGL3_NewFrame();
@@ -223,6 +256,7 @@ void Fast3dGui::ImGuiBackendNewFrame() {
 
 void Fast3dGui::ImGuiWMNewFrame() {
     switch (mImpl.Backend) {
+        case WindowBackend::FAST3D_SDL_FURY:
         case WindowBackend::FAST3D_SDL_OPENGL:
         case WindowBackend::FAST3D_SDL_METAL:
             ImGui_ImplSDL2_NewFrame();
@@ -240,7 +274,8 @@ void Fast3dGui::ImGuiWMNewFrame() {
 // Bind ImGui's SDL2 gamepad backend to the controller(s) the
 // ControlDeck has already opened
 void Fast3dGui::RefreshImGuiGamepads() {
-    if (mImpl.Backend != WindowBackend::FAST3D_SDL_OPENGL && mImpl.Backend != WindowBackend::FAST3D_SDL_METAL) {
+    if (mImpl.Backend != WindowBackend::FAST3D_SDL_OPENGL && mImpl.Backend != WindowBackend::FAST3D_SDL_METAL &&
+        mImpl.Backend != WindowBackend::FAST3D_SDL_FURY) {
         return;
     }
 
@@ -249,6 +284,11 @@ void Fast3dGui::RefreshImGuiGamepads() {
 
 void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
     switch (mImpl.Backend) {
+#ifdef ENABLE_FURY
+        case WindowBackend::FAST3D_SDL_FURY:
+            static_cast<GfxRenderingAPIFury*>(mInterpreter.lock()->GetCurrentRenderingAPI())->RenderGui(data);
+            break;
+#endif
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             ImGui_ImplOpenGL3_RenderDrawData(data);

@@ -27,6 +27,9 @@ class Interpreter;
 typedef struct {
     union {
         struct {
+            void* Window; ///< SDL_Window
+        } Fury;
+        struct {
             void* Window;        ///< HWND
             void* DeviceContext; ///< ID3D11DeviceContext*
             void* Device;        ///< ID3D11Device*

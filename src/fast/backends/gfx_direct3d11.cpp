@@ -1239,6 +1239,19 @@ void GfxRenderingAPIDX11::SetSrgbMode() {
     mSrgbMode = true;
 }
 
+} // namespace Fast
+#endif // ENABLE_DX11
+
+#if defined(ENABLE_DX11) || defined(ENABLE_FURY)
+#include "fast/backends/gfx_hlsl_shader.h"
+#include <spdlog/spdlog.h>
+#include "fast/interpreter.h"
+#include "ship/Context.h"
+#include <prism/processor.h>
+#include <ship/resource/factory/ShaderFactory.h>
+#include <ship/resource/ResourceManager.h>
+
+namespace Fast {
 #define RAND_NOISE "((random(float3(floor(screenSpace.xy * noise_scale), noise_frame)) + 1.0) / 2.0)"
 
 static const char* prism_shader_item_to_str(uint32_t item, bool with_alpha, bool only_alpha, bool inputs_have_alpha,

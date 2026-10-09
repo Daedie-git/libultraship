@@ -1,10 +1,15 @@
 #pragma once
 
 #include "gfx_window_manager_api.h"
+#include <SDL.h>
 namespace Fast {
 class GfxWindowBackendSDL2 final : public GfxWindowBackend {
   public:
-    GfxWindowBackendSDL2() = default;
+    explicit GfxWindowBackendSDL2(bool fury = false) : mFury(fury) {
+    }
+    SDL_Window* GetSDLWindow() const {
+        return mWnd;
+    }
     ~GfxWindowBackendSDL2() override;
 
     void Init(const char* gameName, const char* apiName, bool startFullScreen, uint32_t width, uint32_t height,
@@ -52,10 +57,11 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
     void OnMouseButtonUp(int btn) const;
     void SyncFramerateWithTime() const;
 
-    SDL_Window* mWnd;
+    SDL_Window* mWnd = nullptr;
     SDL_Rect mCursorClip;
-    SDL_GLContext mCtx;
-    SDL_Renderer* mRenderer;
+    SDL_GLContext mCtx = nullptr;
+    SDL_Renderer* mRenderer = nullptr;
+    bool mFury = false;
     int mSdlToLusTable[512];
     float mMouseWheelX = 0.0f;
     float mMouseWheelY = 0.0f;
